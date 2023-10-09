@@ -9,5 +9,6 @@ require (
 
 require (
 	github.com/andybalholm/cascadia v1.3.1 // indirect
+	github.com/sashabaranov/go-openai v1.15.4 // indirect
 	golang.org/x/net v0.7.0 // indirect
 )

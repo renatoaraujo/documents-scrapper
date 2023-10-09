@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/renatoaraujo/go-zenrows"
+	"github.com/sashabaranov/go-openai"
 )
 
 func main() {
@@ -20,9 +23,34 @@ func main() {
 	doc := parseContent(content)
 
 	links := extractLinks(doc)
+
+	openaiClient := createOpenAIClient()
+	var wg sync.WaitGroup
+	summaries := make(chan string, len(links))
+
 	for _, link := range links {
-		fmt.Println(link)
+		wg.Add(1)
+		go func(link string) {
+			defer wg.Done()
+			scrapedContent := scrapeContentForLink(client, link)
+			summary := getSummary(openaiClient, scrapedContent)
+			summaries <- summary
+		}(link)
 	}
+
+	go func() {
+		wg.Wait()
+		close(summaries)
+	}()
+
+	var allSummaries []string
+	for summary := range summaries {
+		allSummaries = append(allSummaries, summary)
+	}
+
+	finalSummary := strings.Join(allSummaries, "\n")
+	companyHealth := askCompanyHealth(openaiClient, finalSummary)
+	fmt.Println(companyHealth)
 }
 
 func getZenrowsAPIKey() string {
@@ -38,7 +66,6 @@ func createZenrowsClient(key string) *zenrows.Client {
 		Timeout: time.Duration(60) * time.Second,
 	}
 	client := zenrows.NewClient(hc).WithApiKey(key)
-
 	return client
 }
 
@@ -51,6 +78,15 @@ func scrapeContent(client *zenrows.Client) string {
 	content, err := client.Scrape("https://polaris.brighterir.com/public/diversified_gas_and_oil/news/rns", zenrows.WithJSInstructions(jsInstructions))
 	if err != nil {
 		log.Fatal(err)
+	}
+	return content
+}
+
+func scrapeContentForLink(client *zenrows.Client, link string) string {
+	content, err := client.Scrape(link)
+	if err != nil {
+		log.Println("error scraping link:", err)
+		return ""
 	}
 	return content
 }
@@ -72,4 +108,52 @@ func extractLinks(doc *goquery.Document) []string {
 		}
 	})
 	return links
+}
+
+func createOpenAIClient() *openai.Client {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	client := openai.NewClient(apiKey)
+	return client
+}
+
+func getSummary(client *openai.Client, content string) string {
+	prompt := fmt.Sprintf("Provide a summary of the following content: %s", content)
+	response, err := client.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: openai.GPT3Dot5Turbo,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: prompt,
+				},
+			},
+		},
+	)
+	if err != nil {
+		log.Println("error getting summary:", err)
+		return ""
+	}
+	return response.Choices[0].Message.Content
+}
+
+func askCompanyHealth(client *openai.Client, summaries string) string {
+	prompt := fmt.Sprintf("Based on the following summaries, what can be inferred about the health of the company?\n%s", summaries)
+	response, err := client.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: openai.GPT3Dot5Turbo,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: prompt,
+				},
+			},
+		},
+	)
+	if err != nil {
+		log.Println("error asking about company health:", err)
+		return ""
+	}
+	return response.Choices[0].Message.Content
 }
